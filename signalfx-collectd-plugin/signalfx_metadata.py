@@ -456,9 +456,7 @@ class CpuUtilization(Utilization):
 
         :return: None
         """
-        min_expected_metrics = 8
-        if sys.platform == 'darwin':
-            min_expected_metrics = 4
+        min_expected_metrics = 4
 
         for t in sorted(self.metrics.keys()):
             if t > self.last_time:
