@@ -816,10 +816,6 @@ def plugin_config(conf):
 
     global POST_URLS
     for kv in conf.children:
-        if kv.key == 'Notifications':
-            if kv.values[0]:
-                global NOTIFICATIONS
-                NOTIFICATIONS = kv.values[0]
         elif kv.key == 'ProcessInfo':
             global PROCESS_INFO
             PROCESS_INFO = kv.values[0]
@@ -876,12 +872,6 @@ def plugin_config(conf):
             "You have specified a different number of Tokens than URLs, "
             "please fix this")
         sys.exit(0)
-
-    if NOTIFICATIONS:
-        log("sending collectd notifications")
-        collectd.register_notification(receive_notifications)
-    else:
-        collectd.register_notification(steal_host_from_notifications)
 
     collectd.register_write(write)
 
@@ -945,9 +935,6 @@ def write(values_obj):
     if UTILIZATION:
         UTILIZATION_INSTANCE.write(values_obj)
 
-    # race notifications for grabbing host
-    steal_host_from_notifications(values_obj)
-
     global MAX_LENGTH
     if not MAX_LENGTH and values_obj.plugin == PLUGIN_NAME and PLUGIN_UPTIME \
             in values_obj.type_instance \
@@ -966,40 +953,6 @@ def send():
 
     send_datapoints()
 
-    # race condition with host dimension existing
-    # don't send metadata on initial iteration, but on a random interval in
-    # the first six, send it then one minute later, then one hour, then one
-    # day, then once a day from then on but off by a fudge factor
-    global NEXT_METADATA_SEND
-    if NEXT_METADATA_SEND == 0:
-        dither = NEXT_METADATA_SEND_INTERVAL.pop(0)
-        NEXT_METADATA_SEND = time.time() + dither
-        log("adding small dither of %s seconds before sending notifications"
-            % dither)
-        save_persistent_data()
-    if NEXT_METADATA_SEND < time.time():
-        send_notifications()
-        if len(NEXT_METADATA_SEND_INTERVAL) > 1:
-            NEXT_METADATA_SEND = \
-                time.time() + NEXT_METADATA_SEND_INTERVAL.pop(0)
-        else:
-            NEXT_METADATA_SEND = time.time() + NEXT_METADATA_SEND_INTERVAL[0]
-
-        log("till next metadata %s seconds"
-            % str(NEXT_METADATA_SEND - time.time()))
-        save_persistent_data()
-
-    global LAST
-    LAST = time.time()
-
-
-def reset_metadata_send():
-    """Reset the next metadata send and the metadata send intervals"""
-    debug("Resetting the next metadata send time and metadata send intervals.")
-    global NEXT_METADATA_SEND
-    NEXT_METADATA_SEND = DEFAULT_NEXT_METADATA_SEND()
-    global NEXT_METADATA_SEND_INTERVAL
-    NEXT_METADATA_SEND_INTERVAL = DEFAULT_NEXT_METADATA_SEND_INTERVAL()
 
 
 def all_interfaces():
@@ -1144,49 +1097,15 @@ def get_collectd_version():
     message for the version information
     """
 
-    global COLLECTD_VERSION
-    if COLLECTD_VERSION:
-        return COLLECTD_VERSION
-
-    COLLECTD_VERSION = "UNKNOWN"
-    try:
-        if sys.platform == 'darwin':
-            output = popen(["/usr/local/sbin/collectd", "-h"])
-        else:
-            output = popen(["/proc/self/exe", "-h"], include_stderr=True)
-
-        for r in ["collectd (.*), http://collectd.org/",
-                  # New agent output is different
-                  r"collectd-version: ([^,]+),"]:
-            regexed = re.search(r, output.decode())
-            if regexed:
-                COLLECTD_VERSION = regexed.groups()[0]
-                break
-    except Exception:
-        t, e = sys.exc_info()[:2]
-        log("trying to parse collectd version failed %s" % e)
-
-    return COLLECTD_VERSION
+    return "NA"
 
 
 def getLsbRelease():
-    path = os.path.join(ETC_PATH, "lsb-release")
-    if os.path.isfile(path):
-        with open(path) as f:
-            for line in f.readlines():
-                regexed = re.search('DISTRIB_DESCRIPTION="(.*)"', line)
-                if regexed:
-                    return regexed.groups()[0]
+    return "NA"
 
 
 def getOsRelease():
-    path = os.path.join(ETC_PATH, "os-release")
-    if os.path.isfile(path):
-        with open(path) as f:
-            for line in f.readlines():
-                regexed = re.search('PRETTY_NAME="(.*)"', line)
-                if regexed:
-                    return regexed.groups()[0]
+    return "Solaris 10 or 11"
 
 
 def getCentos():
@@ -1338,21 +1257,6 @@ def putnotif(property_name, message, plugin_name=PLUGIN_NAME,
                                               type, type_instance, message))
 
 
-def write_notifications(host_info):
-    """emit any new notifications"""
-    for property_name, property_value in iter(host_info.items()):
-        if len(property_value) > 255:
-            receive_notifications(LargeNotif(property_value,
-                                             HOST_TYPE_INSTANCE,
-                                             property_name))
-        else:
-            putnotif(property_name, property_value)
-
-
-def send_notifications():
-    host_info = get_host_info()
-    write_notifications(host_info)
-
 
 def get_severity(severity_int):
     """
@@ -1380,95 +1284,6 @@ def update_response_times(diff):
         if diff > MAX_RESPONSE:
             MAX_RESPONSE = diff
 
-
-def steal_host_from_notifications(notif):
-    """
-    callback to consume notifications from collectd and steal host name from it
-    even if we don't want to have the plugin send them.
-    :param notif: notification
-    :return: true if should continue, false if not
-    """
-
-    if not notif:
-        return False
-
-    if __name__ == "__main__":
-        log(notif)
-        return False
-
-    # we send our own notifications but we don't have access to collectd's
-    # "host" from collectd.conf steal it from notifications we've put on the
-    # bus so we can use it for our own
-    global HOST
-    global SAVED_HOST
-    if not HOST and notif.host:
-        HOST = notif.host
-        # if host is identified and it's different from the saved_host,
-        # reset the metadata send interval and next metadata send time
-        if SAVED_HOST and SAVED_HOST != HOST:
-            debug(("The saved hostname '{0}' does not match the current "
-                   "hostname '{1}'.").format(SAVED_HOST, HOST))
-            reset_metadata_send()
-            SAVED_HOST = HOST
-        log("found host " + HOST)
-
-    return True
-
-
-def receive_notifications(notif):
-    """
-    callback to consume notifications from collectd and emit them to SignalFx.
-    callback will only be called if Notifications was configured to be true.
-    Only send notifications created by other plugs which are above or equal
-    the configured NotifyLevel.
-    """
-
-    if not steal_host_from_notifications(notif):
-        return
-
-    notif_dict = {}
-    # because collectd c->python is a bit limited and lacks __dict__
-    for x in ['host', 'message', 'plugin', 'plugin_instance', 'severity',
-              'time', 'type', 'type_instance']:
-        notif_dict[x] = getattr(notif, x, "")
-
-    # emit notifications that are ours, or satisfy the notify level
-    if notif_dict['plugin'] != PLUGIN_NAME and notif_dict['type'] != TYPE \
-            and notif_dict['type_instance'] not in [HOST_TYPE_INSTANCE,
-                                                    TOP_TYPE_INSTANCE] \
-            and notif_dict["severity"] > NOTIFY_LEVEL:
-        log("event ignored: " + str(notif_dict))
-        return
-
-    if not notif_dict["time"]:
-        notif_dict["time"] = time.time()
-    if not notif_dict["host"]:
-        if HOST:
-            notif_dict["host"] = HOST
-        else:
-            notif_dict["host"] = platform.node()
-        log("no host info, setting to " + notif_dict["host"])
-
-    notif_dict["severity"] = get_severity(notif_dict["severity"])
-    data = compact([notif_dict])
-    headers = {"Content-Type": "application/json"}
-    for i in range(len(POST_URLS)):
-        post_url = POST_URLS[i]
-        if API_TOKENS:
-            headers["X-SF-TOKEN"] = API_TOKENS[i]
-        start = time.time()
-        try:
-            req = urllib2.Request(post_url, data, headers)
-            urllib2.urlopen(req, timeout=TIMEOUT)
-        except Exception:
-            t, e = sys.exc_info()[:2]
-            sys.stdout.write(str(e))
-            log("unsuccessful response: %s" % str(e))
-            global RESPONSE_ERRORS
-            RESPONSE_ERRORS += 1
-        finally:
-            diff = time.time() - start
-            update_response_times(diff * 1000000.0)
 
 
 def restore_sigchld():
