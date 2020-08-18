@@ -816,7 +816,7 @@ def plugin_config(conf):
 
     global POST_URLS
     for kv in conf.children:
-        elif kv.key == 'ProcessInfo':
+        if kv.key == 'ProcessInfo':
             global PROCESS_INFO
             PROCESS_INFO = kv.values[0]
         elif kv.key == 'Datapoints':
